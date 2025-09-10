@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat with a Friend</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <!-- jsPDF for PDF export -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <!-- Firebase CDN -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, collection, query, addDoc, getDocs, deleteDoc, writeBatch } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase global variables
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db, auth;
+        let unsubscribe;
+        let messages = [];
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            try {
+                const app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                console.log("Firebase initialized and user authenticated.");
+                document.getElementById('welcome-section').classList.remove('hidden');
+                document.getElementById('loading').classList.add('hidden');
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+                document.getElementById('loading').innerHTML = `<p class="text-red-500 font-bold">Error loading app. Please check your network connection.</p>`;
+            }
+        });
+
+        document.getElementById('join-btn').addEventListener('click', () => {
+            const usernameInput = document.getElementById('username');
+            const roomNameInput = document.getElementById('room-name');
+            const username = usernameInput.value.trim();
+            const roomName = roomNameInput.value.trim().toLowerCase();
+
+            if (username && roomName) {
+                localStorage.setItem('username', username);
+                localStorage.setItem('roomName', roomName);
+                document.getElementById('welcome-section').classList.add('hidden');
+                document.getElementById('chat-section').classList.remove('hidden');
+                setupChatRoom(roomName);
+            } else {
+                alert('Please enter a username and a room name.');
+            }
+        });
+        
+        document.getElementById('send-btn').addEventListener('click', () => {
+            sendMessage();
+        });
+
+        document.getElementById('message-input').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        document.getElementById('export-csv-btn').addEventListener('click', () => {
+            exportToCSV(messages);
+        });
+
+        document.getElementById('export-pdf-btn').addEventListener('click', () => {
+            exportToPDF(messages);
+        });
+
+        document.getElementById('clear-chat-btn').addEventListener('click', () => {
+            clearChatRoom();
+        });
+
+        document.getElementById('logout-btn').addEventListener('click', () => {
+            if (unsubscribe) {
+                unsubscribe();
+            }
+            localStorage.removeItem('username');
+            localStorage.removeItem('roomName');
+            location.reload();
+        });
+
+        function setupChatRoom(roomName) {
+            const chatHeader = document.getElementById('chat-header-text');
+            chatHeader.textContent = `Room: ${roomName}`;
+            
+            const userIdDisplay = document.getElementById('user-id');
+            userIdDisplay.textContent = `Your ID: ${auth.currentUser.uid.substring(0, 8)}...`;
+
+            const messagesRef = collection(db, `artifacts/${appId}/public/data/chatRooms/${roomName}/messages`);
+            const q = query(messagesRef);
+
+            unsubscribe = onSnapshot(q, (snapshot) => {
+                messages = [];
+                snapshot.forEach(doc => {
+                    messages.push(doc.data());
+                });
+                messages.sort((a, b) => a.timestamp.toDate() - b.timestamp.toDate());
+                renderMessages();
+            });
+        }
+
+        async function sendMessage() {
+            const messageInput = document.getElementById('message-input');
+            const messageText = messageInput.value.trim();
+            if (messageText === '') return;
+
+            const username = localStorage.getItem('username');
+            const roomName = localStorage.getItem('roomName');
+            const messagesRef = collection(db, `artifacts/${appId}/public/data/chatRooms/${roomName}/messages`);
+
+            await addDoc(messagesRef, {
+                username,
+                message: messageText,
+                timestamp: new Date()
+            });
+
+            messageInput.value = '';
+            document.getElementById('chat-box').scrollTop = document.getElementById('chat-box').scrollHeight;
+        }
+
+        function renderMessages() {
+            const chatBox = document.getElementById('chat-box');
+            chatBox.innerHTML = '';
+            messages.forEach(msg => {
+                const messageElement = document.createElement('div');
+                const isUser = msg.username === localStorage.getItem('username');
+                const bubbleColor = isUser ? 'bg-indigo-500 text-white' : 'bg-gray-200 text-gray-800';
+                const alignment = isUser ? 'self-end' : 'self-start';
+
+                messageElement.className = `max-w-xs md:max-w-md p-3 rounded-lg shadow-sm mb-2 break-words ${bubbleColor} ${alignment}`;
+                messageElement.innerHTML = `
+                    <div class="font-bold text-sm mb-1">${isUser ? 'You' : msg.username}</div>
+                    <div>${msg.message}</div>
+                `;
+                chatBox.appendChild(messageElement);
+            });
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        function exportToCSV(data) {
+            const csvRows = ['Username,Message,Timestamp'];
+            data.forEach(msg => {
+                const username = `"${msg.username.replace(/"/g, '""')}"`;
+                const message = `"${msg.message.replace(/"/g, '""')}"`;
+                const timestamp = msg.timestamp.toDate().toISOString();
+                csvRows.push(`${username},${message},${timestamp}`);
+            });
+            const csvString = csvRows.join('\n');
+            const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = `chat_transcript_${new Date().toISOString()}.csv`;
+            link.click();
+        }
+
+        async function exportToPDF(data) {
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF();
+            doc.setFont('Inter');
+            doc.setFontSize(10);
+            const margin = 10;
+            const lineHeight = 7;
+            let y = margin;
+            
+            doc.text(`Chat Transcript - Room: ${localStorage.getItem('roomName')}`, margin, y);
+            y += lineHeight * 2;
+            
+            data.forEach(msg => {
+                const text = `${msg.username} (${new Date(msg.timestamp.toDate()).toLocaleTimeString()}): ${msg.message}`;
+                const splitText = doc.splitTextToSize(text, 180);
+                doc.text(splitText, margin, y);
+                y += lineHeight * splitText.length;
+                if (y > 280) { // New page if needed
+                    doc.addPage();
+                    y = margin;
+                }
+            });
+            doc.save(`chat_transcript_${new Date().toISOString()}.pdf`);
+        }
+
+        async function clearChatRoom() {
+            const roomName = localStorage.getItem('roomName');
+            if (!roomName) return;
+
+            const messagesRef = collection(db, `artifacts/${appId}/public/data/chatRooms/${roomName}/messages`);
+            const q = query(messagesRef);
+            const querySnapshot = await getDocs(q);
+
+            const batch = writeBatch(db);
+            querySnapshot.forEach(doc => {
+                batch.delete(doc.ref);
+            });
+
+            await batch.commit();
+            
+            // Show custom message box instead of alert
+            const modal = document.getElementById('confirmation-modal');
+            const modalMessage = document.getElementById('modal-message');
+            const modalOK = document.getElementById('modal-ok-btn');
+            
+            modalMessage.textContent = "Chat history has been cleared.";
+            modalOK.onclick = () => {
+                modal.classList.add('hidden');
+            };
+            modal.classList.remove('hidden');
+        }
+
+    </script>
+</head>
+<body class="bg-gray-100 font-sans flex items-center justify-center min-h-screen p-4">
+
+    <!-- Confirmation Modal -->
+    <div id="confirmation-modal" class="fixed inset-0 z-50 overflow-y-auto hidden bg-gray-600 bg-opacity-50 flex items-center justify-center">
+        <div class="bg-white rounded-lg p-6 shadow-xl w-80 max-w-full">
+            <div class="text-lg font-bold mb-4" id="modal-message"></div>
+            <div class="flex justify-end">
+                <button id="modal-ok-btn" class="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                    OK
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Loading Screen -->
+    <div id="loading" class="text-center">
+        <div class="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-indigo-500 mx-auto mb-4"></div>
+        <p class="text-gray-600">Loading chat system...</p>
+    </div>
+
+    <!-- Welcome/Join Section -->
+    <div id="welcome-section" class="hidden bg-white p-8 rounded-xl shadow-lg w-full max-w-sm">
+        <h1 class="text-3xl font-bold text-center text-gray-800 mb-6">Welcome!</h1>
+        <p class="text-center text-gray-500 mb-6">Enter your name and a room name to join the chat.</p>
+        <div class="mb-4">
+            <label for="username" class="block text-gray-700 font-semibold mb-2">Your Name</label>
+            <input type="text" id="username" placeholder="e.g., Jane" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+        </div>
+        <div class="mb-6">
+            <label for="room-name" class="block text-gray-700 font-semibold mb-2">Room Name</label>
+            <input type="text" id="room-name" placeholder="e.g., MyRoom" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+        </div>
+        <button id="join-btn" class="w-full bg-indigo-600 text-white py-2 rounded-lg font-bold text-lg hover:bg-indigo-700 transition-colors">
+            Join Chat
+        </button>
+    </div>
+
+    <!-- Main Chat Section -->
+    <div id="chat-section" class="hidden bg-white rounded-xl shadow-lg w-full max-w-lg overflow-hidden flex flex-col h-[80vh] md:h-[90vh]">
+        <!-- Header -->
+        <div class="bg-indigo-600 text-white p-4 flex items-center justify-between shadow-md">
+            <div class="flex-1">
+                <h2 id="chat-header-text" class="text-xl font-bold"></h2>
+                <p id="user-id" class="text-sm opacity-80"></p>
+            </div>
+            <button id="logout-btn" class="px-3 py-1 rounded-md text-white border border-transparent hover:border-white transition-colors text-sm">Leave</button>
+        </div>
+        <!-- Chat Box -->
+        <div id="chat-box" class="flex-1 p-4 overflow-y-auto flex flex-col space-y-2 bg-gray-50">
+            <!-- Messages will be rendered here -->
+        </div>
+        <!-- Input & Controls -->
+        <div class="bg-gray-200 p-4">
+            <div class="flex items-center space-x-2 mb-3">
+                <input type="text" id="message-input" placeholder="Type a message..." class="flex-1 px-4 py-2 rounded-lg border-2 border-gray-300 focus:border-indigo-500 focus:outline-none">
+                <button id="send-btn" class="bg-indigo-600 text-white p-3 rounded-full hover:bg-indigo-700 transition-colors">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
+                    </svg>
+                </button>
+            </div>
+            <div class="flex justify-between items-center text-sm text-gray-600">
+                <span>Export conversation:</span>
+                <div class="flex space-x-2">
+                    <button id="export-csv-btn" class="bg-green-500 text-white px-3 py-1 rounded-lg hover:bg-green-600 transition-colors">CSV</button>
+                    <button id="export-pdf-btn" class="bg-red-500 text-white px-3 py-1 rounded-lg hover:bg-red-600 transition-colors">PDF</button>
+                    <button id="clear-chat-btn" class="bg-gray-500 text-white px-3 py-1 rounded-lg hover:bg-gray-600 transition-colors">Clear Chat</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
